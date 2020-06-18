@@ -1,31 +1,17 @@
-(* *********************************************************************)
-(*                                                                     *)
-(*                        The ZRun Interpreter                         *)
-(*                                                                     *)
-(*                             Marc Pouzet                             *)
-(*                                                                     *)
-(*  Copyright Institut National de Recherche en Informatique et en     *)
-(*  Automatique. All rights reserved. This file is distributed under   *)
-(*  the terms of the INRIA Non-Commercial License Agreement (see the   *)
-(*  LICENSE file).                                                     *)
-(*                                                                     *)
-(* *********************************************************************)
-
 (* A Denotational Semantics for Zelus *)
 (* This is a companion file of working notes on the co-iterative *)
-(* semantics presented at the SYNCHRON workshop, December 2019, *)
-(* the class on "Advanced Functional Programming" given at Bamberg
-   Univ. in June-July 2019 and the Master MPRI - M2, Fall 2019 *)
-open Misc
+(* semantics presented at the SYNCHRON workshop, December 2019 *)
+(* and the class given at Bamberg Univ. in June-July 2019 *)
 open Monad
-open Opt                                                            
+open Result                                                            
 open Ident
 open Ast
 open Value
 open Initial
+open Error
    
 let set_verbose = ref false
-            
+
 (* an input entry in the environment *)
 type 'a ientry = { cur: 'a; default : 'a default }
 
@@ -53,40 +39,38 @@ let print_ienv comment env =
   if !set_verbose then
     Format.printf
       "%s (env): @,%a@]@\n" comment (Env.fprint_t fprint_ientry) env
-
-open Misc
-   
-let stop_at_location loc r_opt =
-  if !set_verbose then
-    match r_opt with
-    | None ->
-       Format.eprintf "%aEvaluation error.@."
-         Location.output_location loc;
-       raise Scoping.Error
-    | Some _ -> r_opt
-  else r_opt
   
-let find_value_opt x env =
-  let* { cur } = Env.find_opt x env in
+let find_value loc x env =
+  match Env.find_opt x env with
+  | None -> Error.error loc (Error.Eunbound_ident(x))
+  | Some entry -> return entry
+
+let find_cur loc x env =
+  let* { cur } = find_value loc x env in
   return cur
 
-let find_last_opt x env =
-  let* { default } = Env.find_opt x env in
+let find_last loc x env =
+  let* { default } = find_value loc x env in
   match default with
   | Last(v) -> return v
-  | _ -> None
+  | _ -> Error.error loc (Error.Eshould_be_last(x))
            
-let find_gnode_opt x env =
-  let* v = Genv.find_opt x env in
-  match v with
-  | Gfun(f) -> return f
-  | _ -> None
+let find_gvalue loc x env =
+  match Genv.find_opt x env with
+  | None -> Error.error loc (Error.Eunbound_lident(x))
+  | Some entry -> return entry
 
-let find_gvalue_opt x env =
-  let* v = Genv.find_opt x env in
-  match v with
+let find_gnode loc x env =
+  let* entry = find_gvalue loc x env in
+  match entry with
+  | Gfun(f) -> return f
+  | _ -> Error.error loc (Error.Eshould_be_node(x))
+
+let find_gvalue loc x env =
+  let* entry = find_gvalue loc x env in
+  match entry with
   | Gvalue(v) -> return v
-  | _ -> None
+  | _ -> Error.error loc (Error.Eshould_be_value(x))
 
 (* value of an immediate constant *)
 let value v =
@@ -118,11 +102,11 @@ let bot_list l = List.map (fun _ -> Vbot) l
 let nil_list l = List.map (fun _ -> Vnil) l
 
 (* merge two environments provided they do not overlap *)
-let merge env1 env2 =
+let merge loc env1 env2 =
   let s = Env.to_seq env1 in
   seqfold
     (fun acc (x, entry) ->
-      if Env.mem x env2 then None
+      if Env.mem x env2 then Error.error loc (Error.Eand_non_linear(x))
       else return (Env.add x entry acc))
     env2 s
                     
@@ -134,17 +118,17 @@ let merge env1 env2 =
 (* [if e then do x = ... and y = ... else do x = ... done]. When [e = false] *)
 (* the value of [y] is the default one given at the definition of [y] *)
 (* for the moment, we treat the absence of a default value as a type error *)
-let by env env_handler write =
+let by loc env env_handler write =
   S.fold
     (fun x acc ->
       (* if [x in env] but not [x in env_handler] *)
       (* then either [x = last x] or [x = default(x)] depending *)
       (* on what is declared for [x]. *)
-      let* { default } as entry = Env.find_opt x env in
+      let* { default } as entry = find_value loc x env in
       if Env.mem x env_handler then acc
       else
         match default with
-        | Val -> None
+        | Val -> Error.error loc (Error.Eno_default(x))
         | Last(v) | Default(v) ->
            let* acc = acc in
            return (Env.add x { entry with cur = v } acc))
@@ -216,11 +200,11 @@ let fixpoint_eq genv env sem eq n s_eq bot =
 (* and [sexp genv env e = f] *)
 (* initial state *)
 let rec iexp genv env { e_desc; e_loc } =
-  let r = match e_desc with
+  match e_desc with
   | Econst _ | Econstr0 _ | Elocal _ | Eglobal _ | Elast _ ->
      return Sempty
   | Econstr1(_, e_list) ->
-     let* s_list = Opt.map (iexp genv env) e_list in
+     let* s_list = Result.map (iexp genv env) e_list in
      return (Stuple(s_list))
   | Eop(op, e_list) ->
      begin match op, e_list with
@@ -245,28 +229,27 @@ let rec iexp genv env { e_desc; e_loc } =
           let* s2 = iexp genv env e2 in
           let* s3 = iexp genv env e3 in
           return (Stuple [s1; s2; s3])
-     | _ -> None
+     | _ -> Error.error e_loc (Error.Etype)
      end
   | Etuple(e_list) -> 
-     let* s_list = Opt.map (iexp genv env) e_list in
+     let* s_list = Result.map (iexp genv env) e_list in
      return (Stuple(s_list))
   | Eget(_, e) ->
      let* s = iexp genv env e in
      return s
   | Eapp(f, e_list) ->
-     let* s_list = Opt.map (iexp genv env) e_list in
-     let* v = find_gnode_opt f genv in
-     let s =
-       match v with | CoFun _ -> Sempty | CoNode { init = s } -> s in
-     return (Stuple(s :: s_list))
+    let* s_list = Result.map (iexp genv env) e_list in
+    let* v = find_gnode e_loc f genv in
+    let s =
+      match v with | CoFun _ -> Sempty | CoNode { init = s } -> s in
+    return (Stuple(s :: s_list))
   | Elet(is_rec, eq, e) ->
      let* s_eq = ieq genv env eq in
      let* se = iexp genv env e in
-     return (Stuple [s_eq; se]) in
-  stop_at_location e_loc r
+     return (Stuple [s_eq; se])
     
 and ieq genv env { eq_desc; eq_loc } =
-  let r = match eq_desc with
+  match eq_desc with
   | EQeq(_, e) -> iexp genv env e
   | EQif(e, eq1, eq2) ->
      let* se = iexp genv env e in
@@ -274,10 +257,10 @@ and ieq genv env { eq_desc; eq_loc } =
      let* seq2 = ieq genv env eq2 in
      return (Stuple [se; seq1; seq2])
   | EQand(eq_list) ->
-     let* seq_list = Opt.map (ieq genv env) eq_list in
+     let* seq_list = Result.map (ieq genv env) eq_list in
      return (Stuple seq_list)
   | EQlocal(v_list, eq) ->
-     let* s_v_list = Opt.map (ivardec genv env) v_list in
+     let* s_v_list = Result.map (ivardec genv env) v_list in
      let* s_eq = ieq genv env eq in
      return (Stuple [Stuple s_v_list; s_eq])
   | EQreset(eq, e) ->
@@ -285,46 +268,47 @@ and ieq genv env { eq_desc; eq_loc } =
      let* se = iexp genv env e in
      return (Stuple [s_eq; se])
   | EQautomaton(_, a_h_list) ->
-     let* s_list = Opt.map (iautomaton_handler genv env) a_h_list in
+     let* s_list = Result.map (iautomaton_handler genv env) a_h_list in
      (* The initial state is the first in the list *)
      (* it is not reset at the first instant *)
-     let* a_h = List.nth_opt a_h_list 0 in
-     let* i = initial_state_of_automaton a_h in
+     let* a_h =
+       Option.to_result ~none:(eq_loc, Error.Eassert_false)
+         (List.nth_opt a_h_list 0) in
+     let* i = initial_state_of_automaton eq_loc a_h in
      return (Stuple(Sval(Value(i)) :: Sval(Value(Vbool(false))) :: s_list))
   | EQmatch(e, m_h_list) ->
      let* se = iexp genv env e in
-     let* sm_list = Opt.map (imatch_handler genv env) m_h_list in
+     let* sm_list = Result.map (imatch_handler genv env) m_h_list in
      return (Stuple (se :: sm_list))
   | EQempty -> return Sempty
   | EQassert(e) ->
      let* se = iexp genv env e in
-     return se in
-  stop_at_location eq_loc r
+     return se
 
-and ivardec genv env { var_default; var_loc } =
-  let r = match var_default with
+and ivardec genv env { var_default } =
+  match var_default with
   | Ewith_init(e) ->
      let* s = iexp genv env e in return (Stuple [Sopt(None); s])
   | Ewith_default(e) -> iexp genv env e
   | Ewith_nothing -> return Sempty
-  | Ewith_last -> return (Sval(Vnil)) in
-  stop_at_location var_loc r
+  | Ewith_last -> return (Sval(Vnil))
 
 and iautomaton_handler genv env { s_vars; s_body; s_trans } =
-  let* sv_list = Opt.map (ivardec genv env) s_vars in
+  let* sv_list = Result.map (ivardec genv env) s_vars in
   let* sb = ieq genv env s_body in
-  let* st_list = Opt.map (iescape genv env) s_trans in
+  let* st_list = Result.map (iescape genv env) s_trans in
   return (Stuple [Stuple(sv_list); sb; Stuple(st_list)])
 
 (* initial state of an automaton *)
-and initial_state_of_automaton { s_state = { desc } } =
+and initial_state_of_automaton loc { s_state = { desc } } =
   match desc with
   | Estate0pat(f) -> return (Vstate0(f))
-  | _ -> None
+  | Estate1pat(f, _) ->
+     Error.error loc (Error.Einitial_state_with_parameter(f))
        
 and iescape genv env { e_cond; e_vars; e_body; e_next_state } =
   let* s_cond = iscondpat genv env e_cond in
-  let* sv_list = Opt.map (ivardec genv env) e_vars in
+  let* sv_list = Result.map (ivardec genv env) e_vars in
   let* s_body = ieq genv env e_body in
   let* s_state = istate genv env e_next_state in
   return (Stuple [s_cond; Stuple(sv_list); s_body; s_state])
@@ -335,17 +319,18 @@ and istate genv env { desc } =
   match desc with
   | Estate0 _ -> return Sempty
   | Estate1(_, e_list) ->
-     let* s_list = Opt.map (iexp genv env) e_list in
+     let* s_list = Result.map (iexp genv env) e_list in
      return (Stuple(s_list))
 
 and imatch_handler genv env { m_vars; m_body } =
-  let* sv_list = Opt.map (ivardec genv env) m_vars in
+  let* sv_list = Result.map (ivardec genv env) m_vars in
   let* sb = ieq genv env m_body in
   return (Stuple[Stuple(sv_list); sb])
 
 (* pattern matching *)
 (* match the value [v] against [x1,...,xn] *)
 let rec matching_pateq { desc } v =
+  let open Opt in
   match desc, v with
   | [x], _ -> return (Env.singleton x { cur = v; default = Val })
   | x_list, Vbot -> matching_list Env.empty x_list (bot_list x_list)
@@ -354,17 +339,19 @@ let rec matching_pateq { desc } v =
   | _ -> None
 
 and matching_list env x_list v_list =
-    match x_list, v_list with
-    | [], [] ->
-       return env
-    | x :: x_list, v :: v_list ->
-       matching_list (Env.add x { cur = v; default = Val } env) x_list v_list
-    | _ -> None
+  let open Opt in
+  match x_list, v_list with
+  | [], [] ->
+     return env
+  | x :: x_list, v :: v_list ->
+     matching_list (Env.add x { cur = v; default = Val } env) x_list v_list
+  | _ -> None
          
 (* match a state f(v1,...,vn) against a state name f(x1,...,xn) *)
-let matching_state ps { desc } =
+let matching_state ps { desc; loc } =
+  let open Opt in
   match ps, desc with
-  | Vstate0(f), Estate0pat(g) when Ident.compare f g = 0 -> Some Env.empty
+  | Vstate0(f), Estate0pat(g) when Ident.compare f g = 0 -> return Env.empty
   | Vstate1(f, v_list), Estate1pat(g, id_list) when Ident.compare f g = 0 ->
      matching_list Env.empty id_list v_list
   | _ -> None
@@ -385,20 +372,20 @@ let reset init step genv env body s r =
 (* the value of an expression [e] in a global environment [genv] and local *)
 (* environment [env] is a step function of type [state -> (value * state) option] *)
 (* [None] is return in case of type error; [Some(v, s)] otherwise *)
-let rec sexp genv env { e_desc = e_desc; e_loc } s =
-  let r = match e_desc, s with   
+let rec sexp genv env { e_desc; e_loc } s =
+  match e_desc, s with   
   | Econst(v), s ->
      return (Value (value v), s)
   | Econstr0(f), s ->
      return (Value (Vconstr0(f)), s)
   | Elocal x, s ->
-     let* v = find_value_opt x env in
+     let* v = find_cur e_loc x env in
      return (v, s)
   | Eglobal g, s ->
-     let* v = find_gvalue_opt g genv in
+     let* v = find_gvalue e_loc g genv in
      return (v, s)
   | Elast x, s ->
-     let* v = find_last_opt x env in
+     let* v = find_last e_loc x env in
      return (v, s)
   | Eop(op, e_list), s ->
      begin match op, e_list, s with
@@ -421,40 +408,46 @@ let rec sexp genv env { e_desc = e_desc; e_loc } s =
        (* see [paper EMSOFT'06] *)
         let* v1, s1 = sexp genv env e1 s1  in
         let* v2, s2 = sexp genv env e2 s2  in
-        let* v_out = Initial.ifthenelse v v1 v2 in
+        let* v_out =
+          Option.to_result ~none:(e_loc, Error.Etype)
+            (Initial.ifthenelse v v1 v2) in
         return (v_out, Stuple [Sval(Value(Vbool(false))); s1; s2])
      | Eifthenelse, [e1; e2; e3], Stuple [s1; s2; s3] ->
         let* v1, s1 = sexp genv env e1 s1 in
         let* v2, s2 = sexp genv env e2 s2 in
         let* v3, s3 = sexp genv env e3 s3 in
-        let* v = ifthenelse v1 v2 v3 in
+        let* v =
+          Option.to_result ~none:(e_loc, Error.Etype)
+            (Initial.ifthenelse v1 v2 v3) in
         return (v, Stuple [s1; s2; s3])
-     | _ -> None
+     | _ -> Error.error e_loc (Error.Etype)
      end
   | Econstr1(f, e_list), Stuple(s_list) ->
-     let* v_list, s_list = sexp_list genv env e_list s_list in
+     let* v_list, s_list = sexp_list e_loc genv env e_list s_list in
      (* check that all component are not nil nor bot *)
      return (strict_constr1 f v_list, Stuple(s_list))
   | Etuple(e_list), Stuple(s_list) ->
-     let* v_list, s_list = sexp_list genv env e_list s_list in
+     let* v_list, s_list = sexp_list e_loc genv env e_list s_list in
      (* check that all component are not nil nor bot *)
      return (strict_tuple v_list, Stuple(s_list))
   | Eget(i, e), s ->
      let* v, s = sexp genv env e s in
-     let* v = Initial.geti i v in
+     let* v = Option.to_result ~none:(e_loc, Error.Etype)
+                (Initial.geti i v) in
      return (v, s)
   | Eapp(f, e_list), Stuple (s :: s_list) ->
-     let* v_list, s_list = sexp_list genv env e_list s_list in
-     let* fv = find_gnode_opt f genv in
+     let* v_list, s_list = sexp_list e_loc genv env e_list s_list in
+     let* fv = find_gnode e_loc f genv in
      let* v, s =
        match fv with
        | CoFun(fv) ->
-          let* v_list = fv v_list in 
-          let* v = tuple v_list in
+          let* v_list =
+            Option.to_result ~none:(e_loc, Error.Etype) (fv v_list) in 
+          let v = tuple v_list in
           return (v, Sempty)
        | CoNode { step = fv } ->
           let* v_list, s = fv s v_list in
-          let* v = tuple v_list in
+          let v = tuple v_list in
           return (v, s) in
      return (v, Stuple (s :: s_list)) 
   | Elet(false, eq, e), Stuple [s_eq; s] ->
@@ -470,29 +463,28 @@ let rec sexp genv env { e_desc = e_desc; e_loc } s =
      let env = Env.append env_eq env in
      let* v, s = sexp genv env e s in
      return (v, Stuple [s_eq; s])
-  | _ -> None in
-  stop_at_location e_loc r
+  | _ -> Error.error e_loc (Error.Etype)
 
-
-and sexp_list genv env e_list s_list =
+and sexp_list loc genv env e_list s_list =
   match e_list, s_list with
   | [], [] -> return ([], [])
   | e :: e_list, s :: s_list ->
      let* v, s = sexp genv env e s in
-     let* v_list, s_list = sexp_list genv env e_list s_list in
+     let* v_list, s_list = sexp_list loc genv env e_list s_list in
      return (v :: v_list, s :: s_list)
-  | _ -> None
+  | _ -> Error.error loc (Error.Etype)
 
 
 (* step function for an equation *)
 and seq genv env { eq_desc; eq_write; eq_loc } s =
-  let r = match eq_desc, s with 
+  match eq_desc, s with 
   | EQeq(p, e), s -> 
      print_ienv "Before (eq)" env;
-     let* v, s1 = sexp genv env e s in
-     let* env_p1 = matching_pateq p v in
-     print_ienv "After (eq)" env_p1;
-     Some (env_p1, s1) (* return (env_p, s))) *)
+     let* v, s = sexp genv env e s in
+     let* env_p =
+       Option.to_result ~none:(eq_loc, Error.Etype) (matching_pateq p v) in
+     print_ienv "After (eq)" env_p;
+     return (env_p, s)
   | EQif(e, eq1, eq2), Stuple [se; s_eq1; s_eq2] ->
       let* v, se = sexp genv env e se in
       let* env_eq, s =
@@ -501,36 +493,39 @@ and seq genv env { eq_desc; eq_write; eq_loc } s =
         | Vbot -> return (bot_env eq_write, Stuple [se; s_eq1; s_eq2])
         | Vnil -> return (nil_env eq_write, Stuple [se; s_eq1; s_eq2])
         | Value(b) ->
-           let* v = boolean b in
+           let* v =
+             Option.to_result ~none:(eq_loc, Error.Etype)(boolean b) in
            if v then
              let* env1, s_eq1 = seq genv env eq1 s_eq1 in
              (* complete the output environment with default *)
              (* or last values from all variables defined in [eq_write] but *)
              (* not in [env1] *)
-             let* env1 = by env env1 eq_write in
+             let* env1 = by eq_loc env env1 eq_write in
              return (env1, Stuple [se; s_eq1; s_eq2]) 
            else
              let* env2, s_eq2 = seq genv env eq2 s_eq2 in
              (* symetric completion *)
-             let* env2 = by env env2 eq_write in
+             let* env2 = by eq_loc env env2 eq_write in
              return (env2, Stuple [se; s_eq1; s_eq2]) in
       return (env_eq, s)
   | EQand(eq_list), Stuple(s_list) ->
      let seq genv env acc eq s =
        let* env_eq, s = seq genv env eq s in
-       let* acc = merge env_eq acc in
+       let* acc = merge eq_loc env_eq acc in
        return (acc, s) in
-     let* env_eq, s_list = mapfold2 (seq genv env) Env.empty eq_list s_list in
+     let* env_eq, s_list =
+       mapfold2 (seq genv env) Env.empty eq_list s_list in
      return (env_eq, Stuple(s_list))
   | EQreset(eq, e), Stuple [s_eq; se] -> 
      let* v, se = sexp genv env e se in 
-     let* env_eq, s_eq =
+     let* env_eq, s =
        match v with
        (* if the condition is bot/nil then all variables have value bot/nil *)
        | Vbot -> return (bot_env eq_write, Stuple [s_eq; se])
        | Vnil -> return (nil_env eq_write, Stuple [s_eq; se])
        | Value(v) ->
-          let* v = boolean v in
+          let* v =
+            Option.to_result ~none:(eq_loc, Error.Eassert_false) (boolean v) in
           reset ieq seq genv env eq s_eq v in    
      return (env_eq, Stuple [s_eq; se])
   | EQlocal(v_list, eq), Stuple [Stuple(s_list); s_eq] ->
@@ -545,8 +540,10 @@ and seq genv env { eq_desc; eq_write; eq_loc } s =
        | (Vnil, _) | (_, Vnil) ->
           return (bot_env eq_write, ps, pr, s_list)
        | Value(ps), Value(pr) ->
-          let* pr = boolean pr in
-          sautomaton_handler_list
+          let* pr =
+            Option.to_result ~none:(eq_loc, Error.Eassert_false)
+              (boolean pr) in
+          sautomaton_handler_list eq_loc
             is_weak genv env eq_write a_h_list ps pr s_list in
      return (env, Stuple (Sval(ns) :: Sval(nr) :: s_list))
   | EQmatch(e, m_h_list), Stuple (se :: s_list) ->
@@ -557,7 +554,7 @@ and seq genv env { eq_desc; eq_write; eq_loc } s =
        | Vbot -> return (bot_env eq_write, s_list)
        | Vnil -> return (nil_env eq_write, s_list)
        | Value(ve) ->
-          smatch_handler_list genv env ve eq_write m_h_list s_list in 
+          smatch_handler_list eq_loc genv env ve eq_write m_h_list s_list in 
      return (env, Stuple (se :: s_list))
   | EQempty, s -> return (Env.empty, s)
   | EQassert(e), s ->
@@ -568,37 +565,34 @@ and seq genv env { eq_desc; eq_write; eq_loc } s =
        match ve with
        | Vnil | Vbot -> return s
        | Value(v) ->
-          let* v = boolean v in
-          (* stop when [no_assert = true] *)
-          if !no_assert then return s 
-          else if v then return s else None in
+          let* v =
+            Option.to_result ~none:(eq_loc, Error.Eassert_false)
+              (boolean v) in
+          if v then return s else None in
      return (Env.empty, s)
-  | _ -> None in
-  stop_at_location eq_loc r
-
+   | _ -> Error.error eq_loc (Error.Etype)
 
 (* block [local x1 [init e1 | default e1 | ],..., xn [...] do eq done *)
-and sblock genv env v_list ({ eq_write; eq_loc } as eq) s_list s_eq =
+and sblock genv env v_list ({ eq_write } as eq) s_list s_eq =
   print_ienv "Block" env;
   let* env_v, s_list =
-    Opt.mapfold3
+    Result.mapfold3
       (svardec genv env) Env.empty v_list s_list (bot_list v_list) in
   let bot = complete env env_v eq_write in
   let n = size eq in
   let* env_eq, s_eq = fixpoint_eq genv env seq eq n s_eq bot in
   (* store the next last value *)
-  let* s_list = Opt.map2 (set_vardec env_eq) v_list s_list in
+  let* s_list = Result.map2 (set_vardec env_eq) v_list s_list in
   (* remove all local variables from [env_eq] *)
   let env = Env.append env_eq env in
   let env_eq = remove env_v env_eq in
-  let r = return (env, env_eq, s_list, s_eq) in
-  stop_at_location eq_loc r
+  return (env, env_eq, s_list, s_eq)
 
 and sblock_with_reset genv env v_list eq s_list s_eq r =
   let* s_list, s_eq =
     if r then
       (* recompute the initial state *)
-      let* s_list = Opt.map (ivardec genv env) v_list in
+      let* s_list = Result.map (ivardec genv env) v_list in
       let* s_eq = ieq genv env eq in
       return (s_list, s_eq)
     else
@@ -619,42 +613,40 @@ and svardec genv env acc { var_name; var_default; var_loc } s v =
             (* first instant *)
             return (Last(ve))
          | Sval(v) | Sopt(Some(v)) -> return (Last(v))
-         | _ -> None in
+         | _ -> Error.error var_loc (Error.Estate) in
        return (lv, Stuple [si; se])
     | Ewith_default(e), se ->
        let* ve, se = sexp genv env e se in
        return (Default(ve), se)
     | Ewith_last, Sval(ve) -> (* [local last x in ... last x ...] *)
        return (Last(ve), s)
-    | _ -> None in
-  let r = return (Env.add var_name { cur = v; default = default } acc, s) in
-  stop_at_location var_loc r
+    | _ -> Error.error var_loc (Error.Estate) in
+  return (Env.add var_name { cur = v; default = default } acc, s)
 
 (* store the next value for [last x] in the state of [vardec] declarations *)
 and set_vardec env_eq { var_name; var_loc } s =
-  let r = match s with
-    | Sempty -> return Sempty
-    | Sopt _ | Sval _ ->
-       let* v = find_value_opt var_name env_eq in
-       return (Sval(v))
-    | Stuple [_; se] ->
-       let* v = find_value_opt var_name env_eq in
-       return (Stuple [Sval v; se])
-    | _ -> None in
-  stop_at_location var_loc r
+  match s with
+  | Sempty -> return Sempty
+  | Sopt _ | Sval _ ->
+     let* v = find_cur var_loc var_name env_eq in
+     return (Sval(v))
+  | Stuple [_; se] ->
+     let* v = find_cur var_loc var_name env_eq in
+     return (Stuple [Sval v; se])
+  | _ -> Error.error var_loc (Error.Estate) 
 
 (* remove entries [x, entry] from [env_eq] for *)
 (* every variable [x] defined by [env_v] *)
 and remove env_v env_eq =
   Env.fold (fun x _ acc -> Env.remove x acc) env_v env_eq
 
-and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
+and sautomaton_handler_list
+       loc is_weak genv env eq_write a_h_list ps pr s_list =
   (* automaton with weak transitions *)
   let rec body_and_transition_list a_h_list s_list =
     match a_h_list, s_list with
-    | { s_state; s_vars; s_body; s_trans } :: a_h_list,
-      (Stuple [Stuple(ss_var_list); ss_body;
-               Stuple(ss_trans)] as s) :: s_list ->
+    | { s_state; s_vars; s_body; s_trans; s_loc } :: a_h_list,
+      (Stuple [Stuple(ss_var_list); ss_body; Stuple(ss_trans)] as s) :: s_list ->
      let r = matching_state ps s_state in
      let* env_handler, ns, nr, s_list =
        match r with
@@ -673,12 +665,11 @@ and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
             sescape_list genv env s_trans ss_trans ps pr in
           return
             (env_body, ns, nr,
-             Stuple [Stuple(ss_var_list); ss_body;
-                     Stuple(ss_trans)] :: s_list) in
+             Stuple [Stuple(ss_var_list); ss_body; Stuple(ss_trans)] :: s_list) in
      (* complete missing entries in the environment *) 
-     let* env_handler = by env env_handler eq_write in
+     let* env_handler = by loc env env_handler eq_write in
      return (env_handler, ns, nr, s_list)
-    | _ -> None in 
+    | _ -> Error.error loc (Error.Etype) in 
   
   (* automaton with strong transitions *)
   (* 1/ choose the active state by testing unless transitions of the *)
@@ -701,7 +692,7 @@ and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
         return
           (env_trans, ns, nr,
            Stuple [ss_var; ss_body; Stuple(ss_trans)] :: s_list) end
-    | _ -> None in
+    | _ -> Error.error loc (Error.Etype) in
   (* 2/ execute the body of the target state *)
   let rec body_list a_h_list ps pr s_list =
     match a_h_list, s_list with
@@ -719,9 +710,8 @@ and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
         let* _, env_body, ss_var_list, ss_body =
           sblock_with_reset genv env s_vars s_body ss_var_list ss_body pr in
         return
-          (env_body, Stuple [Stuple(ss_var_list); ss_body;
-                             ss_trans] :: s_list) end
-   | _ -> None in
+          (env_body, Stuple [Stuple(ss_var_list); ss_body; ss_trans] :: s_list) end
+   | _ -> Error.error loc (Error.Etype) in
   if is_weak then
     body_and_transition_list a_h_list s_list
   else
@@ -734,11 +724,12 @@ and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
     | (Vnil, _) | (_, Vnil) ->
        return (bot_env eq_write, ns, nr, s_list)
     | Value(vns), Value(vnr) ->
-       let* vnr = boolean vnr in
+       let* vnr =
+         Option.to_result ~none:(loc, Error.Etype) (boolean vnr) in
        let* env_body, s_list = body_list a_h_list vns vnr s_list in
        let env_handler = Env.append env_trans env_body in
        (* complete missing entries in the environment *)
-       let* env_handler = by env env_handler eq_write in
+       let* env_handler = by loc env env_handler eq_write in
        return (env_handler, ns, nr, s_list)
 
 (* [Given a transition t, a name ps of a state in the automaton, a value pr *)
@@ -748,11 +739,11 @@ and sautomaton_handler_list is_weak genv env eq_write a_h_list ps pr s_list =
 (* a new state *)
 and sescape_list genv env escape_list s_list ps pr =
   match escape_list, s_list with
-  | [], [] -> return (Env.empty, (Value ps, Value (Vbool false)), [])
+  | [], [] -> return (Env.empty, (Value ps, Value (Vbool pr)), [])
   | { e_cond; e_reset; e_vars; e_body; e_next_state } :: escape_list,
     Stuple [s_cond; Stuple(s_var_list); s_body; s_next_state] :: s_list ->
       (* if [pr=true] then the transition is reset *)
-     let* v, s_cond = reset iscondpat sscondpat genv env e_cond s_cond pr in
+     let* v, s = reset iscondpat sscondpat genv env e_cond s_cond pr in
      let* env_body, (ns, nr), s =
        match v with
        (* if [v = bot/nil] the state and reset bit are also bot/nil *)
@@ -765,15 +756,12 @@ and sescape_list genv env escape_list s_list ps pr =
                   (Vnil, Vnil), Stuple [s_cond; Stuple(s_var_list);
                                         s_body; s_next_state] :: s_list)
        | Value(v) ->
-          (* revoir le traitement. L'etat des conditions *)
-          (* change mais les equations ne sont evaluees que lorsque *)
-          (* la condition est vraie *)
-          (* le code ci-dessous ne le fait pas. *)
-          let* v = boolean v in
+          let* v =
+            Option.to_result ~none:(loc, Error.Etype) (boolean v) in
           let* env, env_body, s_var_list, s_body =
             sblock_with_reset genv env e_vars e_body s_var_list s_body pr in
           let* ns, s_next_state = sstate genv env e_next_state s_next_state in
-          let* env_others, (s, r), s_list =
+          let* env_body, (s, r), s_list =
             sescape_list genv env escape_list s_list ps pr in
           let ns, nr = 
             if v then (ns, Value(Vbool(e_reset))) else (s, r) in
@@ -785,18 +773,18 @@ and sescape_list genv env escape_list s_list ps pr =
     
 and sscondpat genv env e_cond s = sexp genv env e_cond s
                               
-and sstate genv env { desc } s =
+and sstate genv env { desc; loc } s =
   match desc, s with
   | Estate0(f), Sempty -> return (Value(Vstate0(f)), Sempty)
   | Estate1(f, e_list), Stuple s_list ->
-     let* v_s_list = Opt.map2 (sexp genv env) e_list s_list in
+     let* v_s_list = Result.map2 (sexp genv env) e_list s_list in
      let v_list, s_list = List.split v_s_list in
      return (Value(Vstate1(f, v_list)), Stuple(s_list))
-  | _ -> None
+  | _ -> Error.error loc (Error.Estate) 
 
-and smatch_handler_list genv env ve eq_write m_h_list s_list =
+and smatch_handler_list loc genv env ve eq_write m_h_list s_list =
   match m_h_list, s_list with
-  | [], [] -> None
+  | [], [] -> Error.error loc (Error.Etype) 
   | { m_pat; m_vars; m_body } :: m_h_list,
     (Stuple [Stuple(ss_var_list); ss_body] as s) :: s_list ->
      let r = matching_pattern ve m_pat in
@@ -805,7 +793,7 @@ and smatch_handler_list genv env ve eq_write m_h_list s_list =
        | None ->
           (* this is not the good handler; try an other one *)
           let* env_handler, s_list =
-            smatch_handler_list genv env ve eq_write m_h_list s_list in
+            smatch_handler_list loc genv env ve eq_write m_h_list s_list in
           return (env_handler, s :: s_list)
        | Some(env_pat) ->
           let env = Env.append env_pat env in
@@ -814,15 +802,15 @@ and smatch_handler_list genv env ve eq_write m_h_list s_list =
           return
             (env_handler, Stuple [Stuple(ss_var_list); ss_body] :: s_list) in
      (* complete missing entries in the environment *)
-     let* env_handler = by env env_handler eq_write in
+     let* env_handler = by loc env env_handler eq_write in
      return (env_handler, s_list)
-  | _ -> None
+  | _ -> Error.error loc (Error.Etype) 
 
 let matching_in env { var_name; var_default } v =
   return (Env.add var_name { cur = v; default = Val } env)
 
 let matching_out env { var_name; var_default } =
-  find_value_opt var_name env
+  find_cur var_name env
   
 let funexp genv { f_kind; f_atomic; f_args; f_res; f_body } =
   let* si = ieq genv Env.empty f_body in
@@ -833,15 +821,15 @@ let funexp genv { f_kind; f_atomic; f_args; f_res; f_body } =
        (CoFun
           (fun v_list ->
             let* env =
-              Opt.fold2 matching_in Env.empty f_args v_list in
+              Result.fold2 matching_in Env.empty f_args v_list in
             let* env, _ = seq genv env f_body si in
-            let* v_list = Opt.map (matching_out env) f_res in
+            let* v_list = Result.map (matching_out env) f_res in
             return (v_list)))
   | Enode ->
      (* stateful function *)
      (* add the initial state for the input and output vardec *)
-     let* s_f_args = Opt.map (ivardec genv Env.empty) f_args in
-     let* s_f_res = Opt.map (ivardec genv Env.empty) f_res in
+     let* s_f_args = Result.map (ivardec genv Env.empty) f_args in
+     let* s_f_res = Result.map (ivardec genv Env.empty) f_res in
      return
        (CoNode
           { init = Stuple [Stuple(s_f_args); Stuple(s_f_res); si];
@@ -851,7 +839,7 @@ let funexp genv { f_kind; f_atomic; f_args; f_res; f_body } =
               | Stuple [Stuple(s_f_args); Stuple(s_f_res); s_body] ->
                   (* associate the input value to the argument *) 
                  let* env_args, s_f_args =
-                   Opt.mapfold3 (svardec genv Env.empty)
+                   Result.mapfold3 (svardec genv Env.empty)
                      Env.empty f_args s_f_args v_list in
                  let* env_res, s_f_res =
                    Opt.mapfold3 (svardec genv env_args)
@@ -913,11 +901,11 @@ let run_node output init step n =
 
 (* The main entry function *)
 let run genv main ff n =
-  let* fv = find_gnode_opt (Name main) genv in
+  let* fv = find_gnode (Name main) genv in
   (* the main function must be of type : unit -> t *)
   let output v_list =
-    let* v_list = Opt.map Initial.value v_list in
-    let _ = Output.pvalue_list_and_flush ff v_list in
+    let* v_list = Result.map Initial.value v_list in
+    let _ = Initial.Output.pvalue_list_and_flush ff v_list in
     return () in
   match fv with
   | CoFun(fv) -> run_fun output fv n
@@ -925,7 +913,7 @@ let run genv main ff n =
      run_node output init step n
 
 let check genv main n =
-  let* fv = find_gnode_opt (Name main) genv in
+  let* fv = find_gnode (Name main) genv in
   (* the main function must be of type : unit -> bool *)
   let output v =
     if v = [Value(Vbool(true))] then return () else None in

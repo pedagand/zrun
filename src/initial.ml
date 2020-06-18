@@ -1,16 +1,3 @@
-(* *********************************************************************)
-(*                                                                     *)
-(*                        The ZRun Interpreter                         *)
-(*                                                                     *)
-(*                             Marc Pouzet                             *)
-(*                                                                     *)
-(*  Copyright Institut National de Recherche en Informatique et en     *)
-(*  Automatique. All rights reserved. This file is distributed under   *)
-(*  the terms of the INRIA Non-Commercial License Agreement (see the   *)
-(*  LICENSE file).                                                     *)
-(*                                                                     *)
-(* *********************************************************************)
-
 open Value
 open Monad
 open Opt
@@ -74,21 +61,9 @@ let mod_op v1 v2 =
   let* v2 = integer v2 in
   return (Vint(v1 mod v2))
 
-let eq_op v1 v2 =
+let mod_eq v1 v2 =
   return (Vbool(v1 = v2))
 
-let lt_op v1 v2 =
-  return (Vbool(v1 < v2))
-
-let gt_op v1 v2 =
-  return (Vbool(v1 > v2))
-
-let lte_op v1 v2 =
-  return (Vbool(v1 <= v2))
-
-let gte_op v1 v2 =
-  return (Vbool(v1 >= v2))
-  
 let geti i v =
   let rec geti i v_list =
     match v_list with
@@ -203,10 +178,9 @@ let strict_constr1 f v_list =
 
 let tuple v_list =
   match v_list with
-  | [] -> None
-  | [v] -> return v
-  | _ -> return (Value(Vtuple(v_list)))
-      
+  | [v] -> v
+  | _ -> Value(Vtuple(v_list))
+       
 
 (* check that v is a list of length one *)
 let one v =
@@ -221,7 +195,8 @@ let two v =
   | _ -> None
        
 let unop op =
-  CoFun (fun v -> let* v = one v in let* v = lift1 op v in return [v])
+  CoFun
+    (fun v -> let* v = one v in let* v = lift1 op v in return [v])
 
 let binop op =
   CoFun
@@ -241,12 +216,9 @@ let genv0 =
    "or", binop or_op;
    "||", binop or_op;
    "mod", binop mod_op;
-   "=", binop eq_op;
-   "<", binop lt_op;
-   ">", binop gt_op;
-   "<=", binop lte_op;
-   ">=", binop gte_op]
+   "=", binop mod_eq]
 
 let genv0 =
-  List.fold_left (fun acc (n, v) -> Genv.add (Name n) (Gfun v) acc) Genv.empty genv0
+  List.fold_left
+    (fun acc (n, v) -> Genv.add (Name n) (Gfun v) acc) Genv.empty genv0
    

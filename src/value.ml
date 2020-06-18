@@ -1,16 +1,3 @@
-(* *********************************************************************)
-(*                                                                     *)
-(*                        The ZRun Interpreter                         *)
-(*                                                                     *)
-(*                             Marc Pouzet                             *)
-(*                                                                     *)
-(*  Copyright Institut National de Recherche en Informatique et en     *)
-(*  Automatique. All rights reserved. This file is distributed under   *)
-(*  the terms of the INRIA Non-Commercial License Agreement (see the   *)
-(*  LICENSE file).                                                     *)
-(*                                                                     *)
-(* *********************************************************************)
-
 (* Set of values *)
 (* noinitialized and non causal values *)
 
@@ -40,15 +27,16 @@ type state =
   | Sval : value -> state
   | Sopt : value option -> state
                  
-type ('a, 's) costream =
+type ('a, 's, 'e) costream =
   | CoF : { init : 's;
-            step : 's -> ('a * 's) option } -> ('a, 's) costream
+            step : 's -> (('a * 's), 'e) Result.t } -> ('a, 's, 'e) costream
 
-type ('a, 'b, 's) node =
-  | CoFun  : ('a -> 'b option) -> ('a, 'b, 's) node
-  | CoNode : { init : 's;
-               step : 's -> 'a -> ('b * 's) option } -> ('a, 'b, 's) node
+type ('a, 'b, 's, 'e) node =
+  | CoFun  : ('a -> 'b option) -> ('a, 'b, 's, 'e) node
+  | CoNode :
+      { init : 's;
+        step : 's -> 'a -> (('b * 's), 'e) Result.t } -> ('a, 'b, 's, 'e) node
 
 type gvalue =
   | Gvalue : value -> gvalue
-  | Gfun : (value list, value list, state) node -> gvalue
+  | Gfun : (value list, value list, state, Error.t) node -> gvalue

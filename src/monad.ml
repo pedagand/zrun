@@ -1,16 +1,3 @@
-(* *********************************************************************)
-(*                                                                     *)
-(*                        The ZRun Interpreter                         *)
-(*                                                                     *)
-(*                             Marc Pouzet                             *)
-(*                                                                     *)
-(*  Copyright Institut National de Recherche en Informatique et en     *)
-(*  Automatique. All rights reserved. This file is distributed under   *)
-(*  the terms of the INRIA Non-Commercial License Agreement (see the   *)
-(*  LICENSE file).                                                     *)
-(*                                                                     *)
-(* *********************************************************************)
-
 module Opt =
   struct
     (* [let* x = e in f x] *)
@@ -153,6 +140,13 @@ module Result =
          let* acc = f acc x in
          let* acc = fold f acc x_list in
          return acc
+
+    let rec seqfold f acc x_seq =
+      match x_seq () with
+      | Seq.Nil -> return acc
+      | Seq.Cons(x, x_seq) ->
+         let* acc = f acc x in
+         seqfold f acc x_seq
 
     let rec fold2 with_error f acc x_list y_list =
       match x_list, y_list with
