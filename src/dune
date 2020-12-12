@@ -1,6 +1,7 @@
 (executables 
     (names zrun)
     (modes byte exe)
+    (libraries unix)
     (promote (until-clean) (into ..)))	
 	     
 (ocamllex (modules lexer))

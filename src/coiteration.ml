@@ -868,26 +868,6 @@ let funexp genv { f_kind; f_atomic; f_args; f_res; f_body; f_loc } =
               | _ -> None }) in
   stop_at_location f_loc f
 
-let exp genv env e =
-  let* init = iexp genv env e in
-  let step s = sexp genv env e s in
-  return (CoF { init = init; step = step })
-  
-let implementation genv { desc; loc } =
-  let r = match desc with
-  | Eletdecl(f, e) ->
-     (* [e] should be stateless, that is, [step s = v, s] *)
-     let* si = iexp genv Env.empty e in
-     let* v, s = sexp genv Env.empty e si in
-     return (Genv.add (Name(f)) (Gvalue(v)) genv)
-  | Eletfundecl(f, fd) ->
-     let* fv = funexp genv fd in
-     return (Genv.add (Name(f)) (Gfun(fv)) genv)
-  | Etypedecl(f, td) ->
-     return genv in
-  stop_at_location loc r 
-     
-let program genv i_list = Opt.fold implementation genv i_list
 
 (* check that a value is causally correct (non bot) *)
 (* and initialized (non nil) *)
@@ -947,3 +927,32 @@ let check genv main n =
   | CoNode { init; step } ->
      run_node output init step n
  
+let exp genv env e =
+  let* init = iexp genv env e in
+  let step s = sexp genv env e s in
+  return (CoF { init = init; step = step })
+  
+let implementation genv { desc; loc } =
+  let r = match desc with
+  | Eletdecl(f, e) ->
+     (* [e] should be stateless, that is, [step s = v, s] *)
+     let* si = iexp genv Env.empty e in
+     let* v, s = sexp genv Env.empty e si in
+     return (Genv.add (Name(f)) (Gvalue(v)) genv)
+  | Eletfundecl(f, fd) ->
+     let* fv = funexp genv fd in
+     return (Genv.add (Name(f)) (Gfun(fv)) genv)
+  | Etypedecl(f, td) ->
+     return genv in
+  stop_at_location loc r 
+
+let add_value ff loc name entry =
+  try
+    Module.add_value name entry
+  with
+    | Already_defined(x) -> message loc (Ealready_defined_value(x))
+
+let program genv i_list =
+  let* l = Opt.fold implementation genv i_list in
+  Genv.iter (add_value  ff loc);
+  return l

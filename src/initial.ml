@@ -15,6 +15,7 @@ open Value
 open Monad
 open Opt
 open Lident
+open Modules
    
 module Genv = Map.Make(Lident)
 

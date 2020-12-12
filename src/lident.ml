@@ -11,13 +11,12 @@
 (*                                                                     *)
 (* *********************************************************************)
 
+(* long identifiers *)
 type t =
-  | Name : string -> t
-  | Modname : qualident -> t
+    | Name of string
+    | Modname of qualident
 
-and qualident = { qual : string; id: string }
-
-let compare = compare
+and qualident = { qual: string; id: string }
 
 let qualidname { qual = m; id = id } = m ^ "." ^ id
 
@@ -30,4 +29,5 @@ let source = function
   | Modname(qualid) -> qualid.id
 
 let fprint_t ff id = Format.fprintf ff "%s" (modname id)
-      
+
+let compare = compare
